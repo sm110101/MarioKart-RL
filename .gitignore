@@ -4,3 +4,4 @@ ROM/*
 # Planning document
 PLAN.md
 *.png
+__pycache__/*

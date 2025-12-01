@@ -13,6 +13,11 @@ try:
 except Exception as import_error:
     raise import_error
 
+try:
+    # Keys enum and keymask for keypad/button mapping
+    from desmume.controls import Keys, keymask
+except Exception as import_error:
+    raise import_error
 
 # Minimal discrete action set; inputs are wired in a later step
 ACTIONS: list[list[str]] = [
@@ -23,6 +28,23 @@ ACTIONS: list[list[str]] = [
     ["LEFT"],
     ["RIGHT"],
 ]
+
+
+# Map abstract button names to py-desmume keypad bitmasks
+BUTTON_MAP: dict[str, int] = {
+    "A": keymask(Keys.KEY_A),
+    "B": keymask(Keys.KEY_B),
+    "X": keymask(Keys.KEY_X),
+    "Y": keymask(Keys.KEY_Y),
+    "L": keymask(Keys.KEY_L),
+    "R": keymask(Keys.KEY_R),
+    "START": keymask(Keys.KEY_START),
+    "SELECT": keymask(Keys.KEY_SELECT),
+    "UP": keymask(Keys.KEY_UP),
+    "DOWN": keymask(Keys.KEY_DOWN),
+    "LEFT": keymask(Keys.KEY_LEFT),
+    "RIGHT": keymask(Keys.KEY_RIGHT),
+}
 
 
 class MarioKartDSEnv(gym.Env):
@@ -73,10 +95,23 @@ class MarioKartDSEnv(gym.Env):
         top_rgb = self._capture_top_rgb()
         return preprocess_frame(top_rgb)
 
-    def _apply_buttons(self, action: int) -> None:
-        # Stub: input mapping will be implemented next step using DeSmuME.input
-        _ = ACTIONS[action]
-        return
+    def _clear_action_keys(self) -> None:
+        # Release all keys we may have pressed for control actions
+        for key in BUTTON_MAP.values():
+            try:
+                self.emu.input.keypad_rm_key(key)
+            except Exception:
+                # If not pressed, ignore
+                pass
+
+    def _apply_buttons_for_frame(self, action: int) -> None:
+        # Clear previous inputs to ensure per-frame consistency
+        self._clear_action_keys()
+        buttons = ACTIONS[action]
+        for name in buttons:
+            mask = BUTTON_MAP.get(name)
+            if mask is not None:
+                self.emu.input.keypad_add_key(mask)
 
     def reset(self, *, seed: int | None = None, options: dict | None = None) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed)
@@ -90,8 +125,12 @@ class MarioKartDSEnv(gym.Env):
         return obs, info
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        self._apply_buttons(action)
-        self._cycle_frames(self.frame_skip)
+        # Apply inputs per frame for consistent "held" semantics
+        for _ in range(self.frame_skip):
+            self._apply_buttons_for_frame(action)
+            self._cycle_frames(1)
+        # Ensure keys are released after the action window
+        self._clear_action_keys()
 
         obs_single = self._get_obs_single()
         obs = self.frame_stacker.step(obs_single)
