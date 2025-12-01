@@ -74,6 +74,8 @@ Class: `MarioKartInterface`
   - 4: A+DOWN (brake/drift)
   - 5: release (coast)
 - Live viewing: no special render; assume emulator window is visible
+- During training, only save the footage from the fastest laps
+
 - Notes:
   - Add clear TODOs for exact memory addresses and calibration
   - Provide helpful error messages if py-desmume is missing
