@@ -1,0 +1,41 @@
+# Placeholder memory map for Mario Kart DS.
+# Replace the addr values with correct addresses for your ROM build.
+# size: 1|2|4 bytes. little_endian: true|false. signed: true|false. scale: optional float multiplier.
+
+
+progress:
+  # 0x0236A19A — Distance from start (user-provided)
+  addr: 0x0236A19A
+  size: 2
+  little_endian: true
+  signed: false
+  scale: 1.0
+
+
+speed:
+  # 0x02367EEA — Likely speed (user-provided)
+  addr: 0x02367EEA
+  size: 1
+  little_endian: true
+  signed: false
+  # Scale 1-byte speed to a small reward contribution (max ~0.255)
+  scale: 0.001
+
+
+wrong_way:
+  # Mapped to 'Wrong Way' flag for now (0x0217B8C4, user-provided)
+  addr: 0x0217B8C4
+  size: 1
+  little_endian: true
+  signed: false
+
+
+lap:
+  # 0x0217B85C — Likely lap (user-provided)
+  addr: 0x0217B85C
+  size: 1
+  little_endian: true
+  signed: false
+
+
+

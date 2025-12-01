@@ -1,16 +1,6 @@
-from desmume.emulator import DeSmuME
-import time
+import torch
+print("torch:", torch.__version__, "cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("device:", torch.cuda.get_device_name(0))
 
-def main():
-    emu = DeSmuME()
-    emu.open("ROM/mariokart.nds")
-     
-    window = emu.create_sdl_window()
-    while not window.has_quit():
-        window.process_input()
-        time.sleep(0.01)
-        emu.cycle()
-        window.draw()
-
-if __name__ == "__main__":
-    main()

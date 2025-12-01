@@ -1,0 +1,90 @@
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+from stable_baselines3 import DQN
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+from stable_baselines3.common.vec_env import DummyVecEnv
+
+# Allow running this file directly
+if __package__ is None or __package__ == "":
+    repo_root_for_imports = Path(__file__).resolve().parents[2]
+    if str(repo_root_for_imports) not in sys.path:
+        sys.path.insert(0, str(repo_root_for_imports))
+
+from src.envs.mario_kart_ds_env import MarioKartDSEnv
+
+
+def make_env(rom_path: str, savestate_path: str, memory_config_path: str | None = None, frame_skip: int = 4, **env_kwargs):
+    def _thunk():
+        return MarioKartDSEnv(
+            rom_path=rom_path,
+            savestate_path=savestate_path,
+            frame_skip=frame_skip,
+            memory_config_path=memory_config_path,
+            **env_kwargs,
+        )
+    return _thunk
+
+
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[2]
+    rom_path = str(repo_root / "ROM" / "mariokart.nds")
+    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial.dsv")
+    mem_cfg_path = str(repo_root / "src" / "configs" / "memory_addresses.yaml")
+
+    log_dir = repo_root / "runs" / "dqn_mkds"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Prefer GPU if available (RTX 4070 Super)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[train_dqn] Using device: {device}")
+
+    # Production settings: strict wrong-way, reasonable settle, long episodes
+    env_kwargs = dict(
+        settle_frames=180,            # brief settle after savestate
+        grace_steps_wrong_way=0,     # terminate immediately on wrong-way
+        grace_steps_no_progress=200, # allow brief stalls early
+        max_steps=8000,              # long enough to finish a lap comfortably
+        debug=False,
+    )
+
+    # Single-env to start; scale later
+    env = DummyVecEnv([make_env(rom_path, savestate_path, mem_cfg_path, frame_skip=4, **env_kwargs)])
+    # NOTE: Creating a second DeSmuME instance in-process causes crashes.
+    # Avoid an eval_env in the same process; run eval separately after training.
+
+    model = DQN(
+        policy="CnnPolicy",
+        env=env,
+        learning_rate=1e-4,
+        buffer_size=100_000,
+        learning_starts=10_000,
+        batch_size=32,
+        gamma=0.99,
+        target_update_interval=10_000,
+        train_freq=(4, "step"),
+        verbose=1,
+        tensorboard_log=str(log_dir),
+        device=device,
+    )
+
+    # Callbacks: periodic eval and checkpoints
+    # Removed EvalCallback to avoid multiple emulator instances in the same process.
+
+    ckpt_callback = CheckpointCallback(save_freq=50_000, save_path=str(log_dir / "ckpts"), name_prefix="dqn_mkds")
+
+    total_timesteps = 1_000_000
+    model.learn(total_timesteps=total_timesteps, callback=[ckpt_callback], progress_bar=True)
+
+    model.save(str(log_dir / "final_model"))
+    print("[train_dqn] Training complete. Model saved.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+

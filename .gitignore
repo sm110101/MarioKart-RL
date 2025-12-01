@@ -5,3 +5,6 @@ ROM/*
 PLAN.md
 *.png
 __pycache__/*
+
+
+runs/*

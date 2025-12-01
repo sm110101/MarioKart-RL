@@ -5,6 +5,8 @@ from typing import Any, Tuple
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+import yaml
+from pathlib import Path
 
 from src.vision.preprocess import preprocess_frame, FrameStacker, IMG_H, IMG_W
 
@@ -56,12 +58,24 @@ class MarioKartDSEnv(gym.Env):
         savestate_path: str,
         frame_skip: int = 4,
         max_steps: int = 2000,
+        memory_config_path: str | None = None,
+        settle_frames: int = 10,
+        grace_steps_wrong_way: int = 60,
+        grace_steps_no_progress: int = 60,
+        debug: bool = False,
+        debug_log_path: str | None = None,
     ) -> None:
         super().__init__()
         self.rom_path = rom_path
         self.savestate_path = savestate_path
         self.frame_skip = frame_skip
         self._max_steps = max_steps
+        self._warned_no_memory = False
+        self._settle_frames = max(0, int(settle_frames))
+        self._grace_steps_wrong_way = max(0, int(grace_steps_wrong_way))
+        self._grace_steps_no_progress = max(0, int(grace_steps_no_progress))
+        self._debug = bool(debug)
+        self._debug_log_path = debug_log_path
 
         self.emu = DeSmuME()
         self.emu.open(self.rom_path, auto_resume=False)
@@ -74,6 +88,25 @@ class MarioKartDSEnv(gym.Env):
         self.action_space = spaces.Discrete(len(ACTIONS))
 
         self._episode_steps = 0
+
+        # Memory config for reward/termination
+        if memory_config_path is None:
+            # Default to repo's config path
+            repo_root = Path(__file__).resolve().parents[2]
+            memory_config_path = str(repo_root / "src" / "configs" / "memory_addresses.yaml")
+        self._mem_cfg = self._load_memory_config(memory_config_path)
+        # Track both raw and scaled progress for robust delta under wrap-around
+        self._prev_progress_raw: int | None = None
+        self._prev_progress: float | None = None
+        self._last_lap: int | None = None
+        self._no_progress_counter: int = 0
+        self._since_reset_steps: int = 0
+        # If frame_skip=4, ~15 env steps ≈ 1 second at 60 FPS
+        self._no_progress_limit_steps: int = max(1, int((60 // max(1, frame_skip)) * 5))  # ~5 seconds
+        # Pre-compute modulus for progress unwrapping based on configured size (bytes)
+        progress_entry = self._mem_cfg.get("progress", {})
+        self._progress_size_bytes: int = int(progress_entry.get("size", 2)) or 2
+        self._progress_modulus: int = 1 << (8 * self._progress_size_bytes)
 
     def _load_savestate(self) -> None:
         self.emu.savestate.load_file(self.savestate_path)
@@ -118,9 +151,16 @@ class MarioKartDSEnv(gym.Env):
         self._episode_steps = 0
         self._load_savestate()
         # Allow UI elements to settle; adjust if unnecessary
-        self._cycle_frames(10)
+        if self._settle_frames > 0:
+            self._cycle_frames(self._settle_frames)
         first = self._get_obs_single()
         obs = self.frame_stacker.reset(first)
+        # Reset reward/termination trackers
+        self._prev_progress_raw = self._read_entry_raw("progress")
+        self._prev_progress = self._read_progress()
+        self._last_lap = self._read_lap()
+        self._no_progress_counter = 0
+        self._since_reset_steps = 0
         info: dict[str, Any] = {}
         return obs, info
 
@@ -135,11 +175,17 @@ class MarioKartDSEnv(gym.Env):
         obs_single = self._get_obs_single()
         obs = self.frame_stacker.step(obs_single)
 
-        reward = 0.0  # placeholder; will be replaced with RAM-based shaping
+        reward = self._compute_reward()
         self._episode_steps += 1
-        terminated = False
+        self._since_reset_steps += 1
+        terminated = self._check_terminated()
         truncated = self._episode_steps >= self._max_steps
         info: dict[str, Any] = {}
+        if self._debug:
+            info["progress_raw"] = self._read_entry_raw("progress")
+            info["speed"] = self._read_speed()
+            info["wrong_way"] = self._read_wrong_way()
+            info["lap"] = self._read_lap()
         return obs, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray:
@@ -148,5 +194,150 @@ class MarioKartDSEnv(gym.Env):
     def close(self) -> None:
         # Destructor will free resources; explicit cleanup can be added if needed
         return
+
+    # -------- Memory-backed Reward / Termination ----------
+    def _load_memory_config(self, path: str) -> dict:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            data = {}
+        return data
+
+    def _read_entry(self, name: str) -> float | int | None:
+        cfg = self._mem_cfg.get(name)
+        if not cfg:
+            if not self._warned_no_memory:
+                print(f"[MarioKartDSEnv] Missing memory config for '{name}'. Reward will be 0.", flush=True)
+                self._warned_no_memory = True
+            return None
+        try:
+            addr = int(cfg["addr"])
+            size = int(cfg["size"])
+            little_endian = bool(cfg.get("little_endian", True))
+            signed = bool(cfg.get("signed", False))
+            mem = self.emu.memory
+            native_read = getattr(mem, "read", None)
+            if callable(native_read):
+                # Docs: read(start, end, size, signed). start==end -> integer
+                value = int(native_read(addr, addr, size, signed))
+            else:
+                # Fallback: compose from u8 reads
+                read_u8 = getattr(mem, "read_u8", None)
+                if not callable(read_u8):
+                    raise RuntimeError("No suitable memory read method found")
+                data = bytes(read_u8(addr + i) for i in range(size))
+                byteorder = "little" if little_endian else "big"
+                value = int.from_bytes(data, byteorder=byteorder, signed=signed)
+            scale = float(cfg.get("scale", 1.0))
+            return value * scale
+        except Exception:
+            if not self._warned_no_memory:
+                print(f"[MarioKartDSEnv] Failed reading '{name}' from memory. Reward will be 0.", flush=True)
+                self._warned_no_memory = True
+            return None
+
+    def _read_entry_raw(self, name: str) -> int | None:
+        """Read an entry as an unsigned integer ignoring any scale; useful for wrap-around logic."""
+        cfg = self._mem_cfg.get(name)
+        if not cfg:
+            return None
+        try:
+            addr = int(cfg["addr"])
+            size = int(cfg["size"])
+            mem = self.emu.memory
+            native_read = getattr(mem, "read", None)
+            if callable(native_read):
+                return int(native_read(addr, addr, size, False))
+            # Fallback: compose from u8 reads
+            read_u8 = getattr(mem, "read_u8", None)
+            if not callable(read_u8):
+                raise RuntimeError("No suitable memory read method found")
+            data = bytes(read_u8(addr + i) for i in range(size))
+            return int.from_bytes(
+                data,
+                byteorder="little" if bool(cfg.get("little_endian", True)) else "big",
+                signed=False,
+            )
+        except Exception:
+            return None
+
+    def _read_progress(self) -> float | None:
+        return self._read_entry("progress")
+
+    def _read_speed(self) -> float | None:
+        return self._read_entry("speed")
+
+    def _read_wrong_way(self) -> int | None:
+        # Prefer explicit wrong_way entry; fall back to legacy off_road key
+        val = self._read_entry("wrong_way")
+        if val is None:
+            val = self._read_entry("off_road")
+        if val is None:
+            return None
+        return int(val != 0)
+
+    def _read_lap(self) -> int | None:
+        val = self._read_entry("lap")
+        return int(val) if val is not None else None
+
+    def _compute_reward(self) -> float:
+        # Use raw progress with wrap-aware delta, then apply sign from wrong_way
+        progress_raw = self._read_entry_raw("progress")
+        progress = self._read_progress()
+        speed = self._read_speed()
+        wrong_way = self._read_wrong_way()
+
+        if progress_raw is None or speed is None or wrong_way is None:
+            # Fall back to a tiny speed-shaped reward if memory incomplete
+            return float(np.clip(0.01 * float(speed or 0.0) - (0.1 if wrong_way else 0.0), -1.0, 1.0))
+
+        if self._prev_progress_raw is None:
+            self._prev_progress_raw = progress_raw
+
+        # Compute wrap-aware movement magnitude on the ring [0, modulus)
+        modulus = self._progress_modulus
+        forward_delta_mod = (int(progress_raw) - int(self._prev_progress_raw)) % modulus
+        # Min distance on ring (avoid giant jumps from wrap)
+        movement_mag = min(forward_delta_mod, modulus - forward_delta_mod)
+
+        # Determine sign using "wrong way" flag as proxy
+        movement_sign = -1.0 if wrong_way else 1.0
+        delta_progress = movement_sign * float(movement_mag)
+
+        self._prev_progress_raw = progress_raw
+
+        # Track no-progress counter (approx seconds via env steps)
+        if delta_progress <= 0:
+            self._no_progress_counter += 1
+        else:
+            self._no_progress_counter = 0
+
+        r = 0.0
+        r += 1.0 * delta_progress
+        r += 0.01 * float(speed)
+        if wrong_way:
+            r -= 0.1
+        return float(np.clip(r, -1.0, 1.0))
+
+    def _check_terminated(self) -> bool:
+        # Terminate immediately on wrong-way flag (after grace period)
+        ww = self._read_wrong_way()
+        if ww is not None and ww != 0 and self._since_reset_steps > self._grace_steps_wrong_way:
+            return True
+
+        lap = self._read_lap()
+        if lap is not None:
+            if self._last_lap is None:
+                self._last_lap = lap
+            elif lap != self._last_lap:
+                # Lap changed -> terminate episode
+                self._last_lap = lap
+                return True
+        # Stuck detection: no progress for ~N seconds
+        if (self._since_reset_steps > self._grace_steps_no_progress and
+                self._no_progress_counter >= self._no_progress_limit_steps):
+            return True
+        return False
 
 

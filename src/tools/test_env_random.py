@@ -21,7 +21,7 @@ def main() -> int:
     obs, info = env.reset()
     print(f"Initial obs shape: {obs.shape}, dtype={obs.dtype}")
 
-    steps = 100
+    steps = 500
     for t in range(steps):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
