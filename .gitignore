@@ -3,8 +3,3 @@ ROM/*
 
 # Planning document
 PLAN.md
-
-# Development files
-src/envs/
-src/reward/
-test.py
