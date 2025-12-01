@@ -1,0 +1,15 @@
+framework: "torch"
+gamma: 0.99
+lr: 3e-4
+train_batch_size: 4096
+sgd_minibatch_size: 256
+num_sgd_iter: 10
+model:
+  fcnet_hiddens: [256, 256]
+  fcnet_activation: "relu"
+  vf_share_layers: false
+
+# Optional path to behavior cloning weights for warm start
+bc_init_path: null
+
+

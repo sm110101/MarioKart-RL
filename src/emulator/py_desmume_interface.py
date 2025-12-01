@@ -60,6 +60,7 @@ class MarioKartInterface:
         savestate_path: Optional[str] = None,
         frames_per_step: int = 4,
         post_reset_wait_seconds: float = 3.5,
+        per_cycle_sleep_seconds: float = 0.01,
         speed_addr: Optional[int] = None,
         lap_addr: Optional[int] = None,
         progress_addr: Optional[int] = None,
@@ -76,6 +77,7 @@ class MarioKartInterface:
         self.savestate_path = savestate_path
         self.frames_per_step = frames_per_step
         self.post_reset_wait_seconds = max(0.0, float(post_reset_wait_seconds))
+        self.per_cycle_sleep_seconds = max(0.0, float(per_cycle_sleep_seconds))
         self.speed_addr = speed_addr
         self.lap_addr = lap_addr
         self.progress_addr = progress_addr
@@ -122,6 +124,8 @@ class MarioKartInterface:
             except Exception:
                 pass
             self.emu.cycle(with_joystick=False)
+            if self.per_cycle_sleep_seconds > 0.0:
+                time.sleep(self.per_cycle_sleep_seconds)
 
     def step_action(self, action_id: int) -> None:
         """
@@ -145,8 +149,9 @@ class MarioKartInterface:
             mask = add_key(mask, keymask(Keys.KEY_A))
             mask = add_key(mask, keymask(Keys.KEY_RIGHT))
         elif action_id == 4:
+            # Drift/jump with R to align with keyboard mapping (Space -> R)
             mask = add_key(mask, keymask(Keys.KEY_A))
-            mask = add_key(mask, keymask(Keys.KEY_DOWN))
+            mask = add_key(mask, keymask(Keys.KEY_R))
         elif action_id == 5:
             mask = 0  # release / coast
         else:
@@ -158,6 +163,8 @@ class MarioKartInterface:
             except Exception:
                 pass
             self.emu.cycle(with_joystick=False)
+            if self.per_cycle_sleep_seconds > 0.0:
+                time.sleep(self.per_cycle_sleep_seconds)
 
     def get_state(self) -> Dict[str, Optional[int]]:
         """
