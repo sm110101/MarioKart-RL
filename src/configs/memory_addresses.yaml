@@ -4,21 +4,21 @@
 
 progress:
   # 0x02363BE0 — Lap Progress (user-provided)
-  addr: 0x02363BE0
-  size: 4
+  addr: 0x02363BA0
+  size: 2
   little_endian: true
   signed: false
-  scale: 1.0
+  scale: 0.0001
 
 
 speed:
   # 0x02367EEA — Likely speed (user-provided)
-  addr: 0x02367EEE
+  addr: 0x0217AD10
   size: 2
   little_endian: true
   signed: false
   # Scale 2-byte speed down to keep reward from clipping (tunable)
-  scale: 0.0001
+  scale: 0.001
 
 
 wrong_way:

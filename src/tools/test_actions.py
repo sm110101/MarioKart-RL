@@ -5,6 +5,7 @@ from typing import List
 import numpy as np
 from PIL import Image
 import cv2
+import yaml
 
 # Allow running directly
 if __package__ is None or __package__ == "":
@@ -19,7 +20,12 @@ def save_rgb(arr: np.ndarray, path: Path) -> None:
     Image.fromarray(arr.astype(np.uint8), mode="RGB").save(path)
 
 
-def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: Path | None = None) -> dict:
+def read_mem_value(memory, addr: int, size: int, signed: bool) -> int:
+    # Use documented API: read(start, end, size, signed) with start==end to get an int
+    return int(memory.read(addr, addr, size, signed))
+
+
+def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: Path | None = None, mem_cfg: dict | None = None) -> dict:
     obs, info = env.reset()
     # Capture initial top screen
     if out_dir is not None:
@@ -38,10 +44,33 @@ def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: 
         total_reward += reward
         last_info = info
 
-        # Show current top screen with overlayed debug info
+        # Direct memory reads using the same API as probe_memory.py
+        mem_vals = {}
+        if mem_cfg:
+            try:
+                m = env.emu.memory  # type: ignore[attr-defined]
+                for k in ("progress", "speed", "wrong_way", "lap"):
+                    entry = mem_cfg.get(k)
+                    if not entry:
+                        continue
+                    addr = int(entry["addr"])
+                    size = int(entry["size"])
+                    signed = bool(entry.get("signed", False))
+                    val = read_mem_value(m, addr, size, signed)
+                    scale = float(entry.get("scale", 1.0))
+                    mem_vals[k] = val * scale
+                    mem_vals[f"{k}_raw"] = val
+            except Exception as e:
+                mem_vals["err"] = str(e)
+
+        # Show current top screen with overlayed debug info (env info + direct mem)
         frame = env.render()  # RGB (192,256,3)
         vis = cv2.resize(frame, (256 * 2, 192 * 2), interpolation=cv2.INTER_NEAREST)
-        overlay = f"t={t+1} act={ACTIONS[action_idx]} r={reward:.3f} spd={info.get('speed')} prog={info.get('progress_raw')} ww={info.get('wrong_way')}"
+        overlay = (
+            f"t={t+1} act={ACTIONS[action_idx]} r={reward:.3f} "
+            f"env[spd={info.get('speed')} prog={info.get('progress_raw')} ww={info.get('wrong_way')}] "
+            f"mem[spd={mem_vals.get('speed')} prog={mem_vals.get('progress')} ww={mem_vals.get('wrong_way')}]"
+        )
         cv2.putText(vis, overlay, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 230, 20), 1, cv2.LINE_AA)
         cv2.imshow(win_name, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
         # Small wait to keep UI responsive; press 'q' to skip this action early
@@ -72,6 +101,13 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = str(repo_root / "ROM" / "mariokart.nds")
     savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv")
+    mem_cfg_path = repo_root / "src" / "configs" / "memory_addresses.yaml"
+    mem_cfg = {}
+    try:
+        with mem_cfg_path.open("r", encoding="utf-8") as f:
+            mem_cfg = yaml.safe_load(f) or {}
+    except Exception:
+        mem_cfg = {}
 
     # Turn on debug to get info dict populated
     env = MarioKartDSEnv(
@@ -81,7 +117,7 @@ def main() -> int:
         memory_config_path=str(repo_root / "src" / "configs" / "memory_addresses.yaml"),
         settle_frames=0,  # offset savestate
         grace_steps_wrong_way=0,
-        grace_steps_no_progress=120,
+        grace_steps_no_progress=400,
         max_steps=2000,
         debug=True,
     )
@@ -94,7 +130,7 @@ def main() -> int:
     results = []
     for idx in range(len(ACTIONS)):
         print(f"\n=== Testing action {idx}: {ACTIONS[idx]} ===")
-        res = run_action(env, idx, steps=240, out_dir=out_dir)
+        res = run_action(env, idx, steps=240, out_dir=out_dir, mem_cfg=mem_cfg)
         results.append((idx, res))
 
     print("\nSummary:")

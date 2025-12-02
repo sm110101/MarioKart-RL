@@ -281,41 +281,23 @@ class MarioKartDSEnv(gym.Env):
         return int(val) if val is not None else None
 
     def _compute_reward(self) -> float:
-        # Use raw progress with wrap-aware delta, then apply sign from wrong_way
-        progress_raw = self._read_entry_raw("progress")
-        progress = self._read_progress()
+        # Speed-based reward only (scrap progress). Speed is already scaled per YAML.
         speed = self._read_speed()
         wrong_way = self._read_wrong_way()
 
-        if progress_raw is None or speed is None or wrong_way is None:
-            # Fall back to a tiny speed-shaped reward if memory incomplete
-            return float(np.clip(0.01 * float(speed or 0.0) - (0.1 if wrong_way else 0.0), -1.0, 1.0))
+        # Handle missing readings gracefully
+        spd = float(speed or 0.0)
+        ww = 1 if (wrong_way is not None and wrong_way != 0) else 0
 
-        if self._prev_progress_raw is None:
-            self._prev_progress_raw = progress_raw
-
-        # Compute signed, wrap-aware delta on the ring [0, modulus)
-        modulus = self._progress_modulus
-        raw_delta = int(progress_raw) - int(self._prev_progress_raw)
-        half = modulus // 2
-        if raw_delta > half:
-            raw_delta -= modulus
-        elif raw_delta < -half:
-            raw_delta += modulus
-        delta_progress = float(raw_delta)
-
-        self._prev_progress_raw = progress_raw
-
-        # Track no-progress counter (approx seconds via env steps)
-        if delta_progress <= 0:
+        # Consider "stuck" if speed stays below a tiny threshold
+        if spd <= 1e-3:
             self._no_progress_counter += 1
         else:
             self._no_progress_counter = 0
 
-        r = 0.0
-        r += 1.0 * delta_progress
-        r += 0.01 * float(speed)
-        if wrong_way:
+        # Reward: proportional to speed, penalty for wrong-way
+        r = 0.05 * spd  # tune coefficient as needed to avoid clipping
+        if ww:
             r -= 0.1
         return float(np.clip(r, -1.0, 1.0))
 
