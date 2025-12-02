@@ -21,31 +21,31 @@ try:
 except Exception as import_error:
     raise import_error
 
-# Minimal discrete action set; inputs are wired in a later step
+# Minimal discrete action set; expressed using PC key names
 ACTIONS: list[list[str]] = [
-    [],
-    ["A"],
-    ["A", "LEFT"],
-    ["A", "RIGHT"],
-    ["LEFT"],
-    ["RIGHT"],
+    [],                       # 0: no input
+    ["z"],                    # 1: accelerate (Z -> A)
+    ["left"],                 # 2: steer left
+    ["right"],                # 3: steer right
+    ["w", "left", "z"],       # 4: drift left (W+Left+Z -> R+Left+A)
+    ["w", "right", "z"],      # 5: drift right (W+Right+Z -> R+Right+A)
 ]
 
 
-# Map abstract button names to py-desmume keypad bitmasks
-BUTTON_MAP: dict[str, int] = {
-    "A": keymask(Keys.KEY_A),
-    "B": keymask(Keys.KEY_B),
-    "X": keymask(Keys.KEY_X),
-    "Y": keymask(Keys.KEY_Y),
-    "L": keymask(Keys.KEY_L),
-    "R": keymask(Keys.KEY_R),
-    "START": keymask(Keys.KEY_START),
-    "SELECT": keymask(Keys.KEY_SELECT),
-    "UP": keymask(Keys.KEY_UP),
-    "DOWN": keymask(Keys.KEY_DOWN),
-    "LEFT": keymask(Keys.KEY_LEFT),
-    "RIGHT": keymask(Keys.KEY_RIGHT),
+# Map PC keys to DS keypad masks (aligned with manual_control.py)
+PC_TO_DS: dict[str, int] = {
+    "z": keymask(Keys.KEY_A),
+    "x": keymask(Keys.KEY_B),
+    "s": keymask(Keys.KEY_X),
+    "a": keymask(Keys.KEY_Y),
+    "q": keymask(Keys.KEY_L),
+    "w": keymask(Keys.KEY_R),
+    "up": keymask(Keys.KEY_UP),
+    "down": keymask(Keys.KEY_DOWN),
+    "left": keymask(Keys.KEY_LEFT),
+    "right": keymask(Keys.KEY_RIGHT),
+    "enter": keymask(Keys.KEY_START),
+    "backspace": keymask(Keys.KEY_SELECT),
 }
 
 
@@ -114,7 +114,8 @@ class MarioKartDSEnv(gym.Env):
 
     def _cycle_frames(self, n: int) -> None:
         for _ in range(n):
-            self.emu.cycle(with_joystick=True)
+            # We didn't initialize joystick processing; avoid overriding keypad state
+            self.emu.cycle(with_joystick=False)
 
     def _capture_top_rgb(self) -> np.ndarray:
         # Fast path
@@ -130,19 +131,18 @@ class MarioKartDSEnv(gym.Env):
 
     def _clear_action_keys(self) -> None:
         # Release all keys we may have pressed for control actions
-        for key in BUTTON_MAP.values():
+        for key in PC_TO_DS.values():
             try:
                 self.emu.input.keypad_rm_key(key)
             except Exception:
                 # If not pressed, ignore
                 pass
 
-    def _apply_buttons_for_frame(self, action: int) -> None:
-        # Clear previous inputs to ensure per-frame consistency
-        self._clear_action_keys()
+    def _press_action_keys(self, action: int) -> None:
+        # Set keys for this action (held across multiple frames)
         buttons = ACTIONS[action]
         for name in buttons:
-            mask = BUTTON_MAP.get(name)
+            mask = PC_TO_DS.get(name.lower())
             if mask is not None:
                 self.emu.input.keypad_add_key(mask)
 
@@ -165,11 +165,10 @@ class MarioKartDSEnv(gym.Env):
         return obs, info
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        # Apply inputs per frame for consistent "held" semantics
-        for _ in range(self.frame_skip):
-            self._apply_buttons_for_frame(action)
-            self._cycle_frames(1)
-        # Ensure keys are released after the action window
+        # Hold inputs across the entire frame_skip window
+        self._press_action_keys(action)
+        self._cycle_frames(self.frame_skip)
+        # Release inputs after the window
         self._clear_action_keys()
 
         obs_single = self._get_obs_single()
@@ -295,15 +294,15 @@ class MarioKartDSEnv(gym.Env):
         if self._prev_progress_raw is None:
             self._prev_progress_raw = progress_raw
 
-        # Compute wrap-aware movement magnitude on the ring [0, modulus)
+        # Compute signed, wrap-aware delta on the ring [0, modulus)
         modulus = self._progress_modulus
-        forward_delta_mod = (int(progress_raw) - int(self._prev_progress_raw)) % modulus
-        # Min distance on ring (avoid giant jumps from wrap)
-        movement_mag = min(forward_delta_mod, modulus - forward_delta_mod)
-
-        # Determine sign using "wrong way" flag as proxy
-        movement_sign = -1.0 if wrong_way else 1.0
-        delta_progress = movement_sign * float(movement_mag)
+        raw_delta = int(progress_raw) - int(self._prev_progress_raw)
+        half = modulus // 2
+        if raw_delta > half:
+            raw_delta -= modulus
+        elif raw_delta < -half:
+            raw_delta += modulus
+        delta_progress = float(raw_delta)
 
         self._prev_progress_raw = progress_raw
 

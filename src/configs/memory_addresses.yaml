@@ -2,11 +2,10 @@
 # Replace the addr values with correct addresses for your ROM build.
 # size: 1|2|4 bytes. little_endian: true|false. signed: true|false. scale: optional float multiplier.
 
-
 progress:
-  # 0x0236A19A — Distance from start (user-provided)
-  addr: 0x0236A19A
-  size: 2
+  # 0x02363BE0 — Lap Progress (user-provided)
+  addr: 0x02363BE0
+  size: 4
   little_endian: true
   signed: false
   scale: 1.0
@@ -14,12 +13,12 @@ progress:
 
 speed:
   # 0x02367EEA — Likely speed (user-provided)
-  addr: 0x02367EEA
-  size: 1
+  addr: 0x02367EEE
+  size: 2
   little_endian: true
   signed: false
-  # Scale 1-byte speed to a small reward contribution (max ~0.255)
-  scale: 0.001
+  # Scale 2-byte speed down to keep reward from clipping (tunable)
+  scale: 0.0001
 
 
 wrong_way:
@@ -31,7 +30,7 @@ wrong_way:
 
 
 lap:
-  # 0x0217B85C — Likely lap (user-provided)
+  # 0x0217B85C — Likely lap
   addr: 0x0217B85C
   size: 1
   little_endian: true

@@ -32,7 +32,8 @@ def make_env(rom_path: str, savestate_path: str, memory_config_path: str | None 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = str(repo_root / "ROM" / "mariokart.nds")
-    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial.dsv")
+    # Use offset savestate so episode starts measuring immediately
+    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv")
     mem_cfg_path = str(repo_root / "src" / "configs" / "memory_addresses.yaml")
 
     log_dir = repo_root / "runs" / "dqn_mkds"
@@ -42,9 +43,9 @@ def main() -> int:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[train_dqn] Using device: {device}")
 
-    # Production settings: strict wrong-way, reasonable settle, long episodes
+    # Production settings: strict wrong-way, immediate measurement (offset savestate), long episodes
     env_kwargs = dict(
-        settle_frames=180,            # brief settle after savestate
+        settle_frames=0,              # offset savestate already waited 240 frames
         grace_steps_wrong_way=0,     # terminate immediately on wrong-way
         grace_steps_no_progress=200, # allow brief stalls early
         max_steps=8000,              # long enough to finish a lap comfortably
