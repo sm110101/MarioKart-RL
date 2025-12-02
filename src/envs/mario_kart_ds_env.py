@@ -23,12 +23,12 @@ except Exception as import_error:
 
 # Minimal discrete action set; expressed using PC key names
 ACTIONS: list[list[str]] = [
-    [],                       # 0: no input
-    ["z"],                    # 1: accelerate (Z -> A)
-    ["left"],                 # 2: steer left
-    ["right"],                # 3: steer right
-    ["w", "left", "z"],       # 4: drift left (W+Left+Z -> R+Left+A)
-    ["w", "right", "z"],      # 5: drift right (W+Right+Z -> R+Right+A)
+    [],                # 0: no input
+    ["z"],             # 1: accelerate (Z -> A)
+    ["left"],          # 2: steer left
+    ["right"],         # 3: steer right
+    ["z", "left"],     # 4: accelerate + left (no jump/drift)
+    ["z", "right"],    # 5: accelerate + right (no jump/drift)
 ]
 
 
@@ -101,12 +101,22 @@ class MarioKartDSEnv(gym.Env):
         self._last_lap: int | None = None
         self._no_progress_counter: int = 0
         self._since_reset_steps: int = 0
+        self._collisions_prev_raw: int | None = None
+        self._collisions_count: int = 0
         # If frame_skip=4, ~15 env steps ≈ 1 second at 60 FPS
         self._no_progress_limit_steps: int = max(1, int((60 // max(1, frame_skip)) * 5))  # ~5 seconds
         # Pre-compute modulus for progress unwrapping based on configured size (bytes)
         progress_entry = self._mem_cfg.get("progress", {})
         self._progress_size_bytes: int = int(progress_entry.get("size", 2)) or 2
         self._progress_modulus: int = 1 << (8 * self._progress_size_bytes)
+        # Collisions modulus for delta
+        coll_entry = self._mem_cfg.get("collisions", {})
+        self._collisions_size_bytes: int = int(coll_entry.get("size", 1)) or 1
+        self._collisions_modulus: int = 1 << (8 * self._collisions_size_bytes)
+
+        # Collision handling parameters
+        self._collision_penalty: float = float(0.5)
+        self._collision_terminate_threshold: int = int(3)
 
     def _load_savestate(self) -> None:
         self.emu.savestate.load_file(self.savestate_path)
@@ -161,6 +171,8 @@ class MarioKartDSEnv(gym.Env):
         self._last_lap = self._read_lap()
         self._no_progress_counter = 0
         self._since_reset_steps = 0
+        self._collisions_prev_raw = self._read_entry_raw("collisions")
+        self._collisions_count = 0
         info: dict[str, Any] = {}
         return obs, info
 
@@ -185,6 +197,11 @@ class MarioKartDSEnv(gym.Env):
             info["speed"] = self._read_speed()
             info["wrong_way"] = self._read_wrong_way()
             info["lap"] = self._read_lap()
+            info["collisions_raw"] = self._read_entry_raw("collisions")
+            info["collisions_episode"] = self._collisions_count
+        # make last info available to viewers
+        self._last_info = info  # type: ignore[assignment]
+        self._last_reward = reward  # type: ignore[assignment]
         return obs, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray:
@@ -216,18 +233,26 @@ class MarioKartDSEnv(gym.Env):
             little_endian = bool(cfg.get("little_endian", True))
             signed = bool(cfg.get("signed", False))
             mem = self.emu.memory
+            value: int | None = None
+            # 1) Primary documented API
             native_read = getattr(mem, "read", None)
             if callable(native_read):
-                # Docs: read(start, end, size, signed). start==end -> integer
                 value = int(native_read(addr, addr, size, signed))
-            else:
-                # Fallback: compose from u8 reads
+            # 2) Unsigned accessor (some builds expose MemoryAccessor)
+            if value is None:
+                unsigned = getattr(mem, "unsigned", None)
+                u_read = getattr(unsigned, "read", None) if unsigned is not None else None
+                if callable(u_read):
+                    value = int(u_read(addr, addr, size))
+            # 3) Fallback: compose from u8
+            if value is None:
                 read_u8 = getattr(mem, "read_u8", None)
-                if not callable(read_u8):
-                    raise RuntimeError("No suitable memory read method found")
-                data = bytes(read_u8(addr + i) for i in range(size))
-                byteorder = "little" if little_endian else "big"
-                value = int.from_bytes(data, byteorder=byteorder, signed=signed)
+                if callable(read_u8):
+                    data = bytes(read_u8(addr + i) for i in range(size))
+                    byteorder = "little" if little_endian else "big"
+                    value = int.from_bytes(data, byteorder=byteorder, signed=signed)
+            if value is None:
+                raise RuntimeError("No suitable memory read method found")
             scale = float(cfg.get("scale", 1.0))
             return value * scale
         except Exception:
@@ -245,19 +270,25 @@ class MarioKartDSEnv(gym.Env):
             addr = int(cfg["addr"])
             size = int(cfg["size"])
             mem = self.emu.memory
+            # 1) Primary API
             native_read = getattr(mem, "read", None)
             if callable(native_read):
                 return int(native_read(addr, addr, size, False))
-            # Fallback: compose from u8 reads
+            # 2) Unsigned accessor
+            unsigned = getattr(mem, "unsigned", None)
+            u_read = getattr(unsigned, "read", None) if unsigned is not None else None
+            if callable(u_read):
+                return int(u_read(addr, addr, size))
+            # 3) Fallback from bytes
             read_u8 = getattr(mem, "read_u8", None)
-            if not callable(read_u8):
-                raise RuntimeError("No suitable memory read method found")
-            data = bytes(read_u8(addr + i) for i in range(size))
-            return int.from_bytes(
-                data,
-                byteorder="little" if bool(cfg.get("little_endian", True)) else "big",
-                signed=False,
-            )
+            if callable(read_u8):
+                data = bytes(read_u8(addr + i) for i in range(size))
+                return int.from_bytes(
+                    data,
+                    byteorder="little" if bool(cfg.get("little_endian", True)) else "big",
+                    signed=False,
+                )
+            raise RuntimeError("No suitable memory read method found")
         except Exception:
             return None
 
@@ -276,14 +307,27 @@ class MarioKartDSEnv(gym.Env):
             return None
         return int(val != 0)
 
+    def _read_collisions_raw(self) -> int | None:
+        return self._read_entry_raw("collisions")
+
     def _read_lap(self) -> int | None:
         val = self._read_entry("lap")
         return int(val) if val is not None else None
 
     def _compute_reward(self) -> float:
-        # Speed-based reward only (scrap progress). Speed is already scaled per YAML.
+        # Speed-based reward with collision penalties.
         speed = self._read_speed()
         wrong_way = self._read_wrong_way()
+
+        # Collision delta (handle wrap for 1-byte counters)
+        coll_raw = self._read_collisions_raw()
+        if coll_raw is not None:
+            if self._collisions_prev_raw is None:
+                self._collisions_prev_raw = coll_raw
+            delta = (int(coll_raw) - int(self._collisions_prev_raw)) % self._collisions_modulus
+            if delta > 0:
+                self._collisions_count += delta
+            self._collisions_prev_raw = coll_raw
 
         # Handle missing readings gracefully
         spd = float(speed or 0.0)
@@ -295,10 +339,16 @@ class MarioKartDSEnv(gym.Env):
         else:
             self._no_progress_counter = 0
 
-        # Reward: proportional to speed, penalty for wrong-way
+        # Reward: proportional to speed, penalty for wrong-way and collisions
         r = 0.05 * spd  # tune coefficient as needed to avoid clipping
         if ww:
             r -= 0.1
+        if self._collisions_count > 0 and coll_raw is not None:
+            # Penalize only on delta this step
+            # (recompute delta for reward to avoid double-penalizing)
+            delta = (int(coll_raw) - int(self._collisions_prev_raw or coll_raw)) % self._collisions_modulus
+            if delta > 0:
+                r -= self._collision_penalty * float(delta)
         return float(np.clip(r, -1.0, 1.0))
 
     def _check_terminated(self) -> bool:
@@ -318,6 +368,9 @@ class MarioKartDSEnv(gym.Env):
         # Stuck detection: no progress for ~N seconds
         if (self._since_reset_steps > self._grace_steps_no_progress and
                 self._no_progress_counter >= self._no_progress_limit_steps):
+            return True
+        # Collision termination
+        if self._collisions_count >= self._collision_terminate_threshold:
             return True
         return False
 

@@ -21,8 +21,24 @@ def save_rgb(arr: np.ndarray, path: Path) -> None:
 
 
 def read_mem_value(memory, addr: int, size: int, signed: bool) -> int:
-    # Use documented API: read(start, end, size, signed) with start==end to get an int
-    return int(memory.read(addr, addr, size, signed))
+    """
+    Robust read using multiple backends:
+    - memory.read(start, end, size, signed)
+    - memory.unsigned.read(start, end, size)
+    - compose from read_u8 bytes
+    """
+    native_read = getattr(memory, "read", None)
+    if callable(native_read):
+        return int(native_read(addr, addr, size, signed))
+    unsigned = getattr(memory, "unsigned", None)
+    u_read = getattr(unsigned, "read", None) if unsigned is not None else None
+    if callable(u_read):
+        return int(u_read(addr, addr, size))
+    read_u8 = getattr(memory, "read_u8", None)
+    if callable(read_u8):
+        data = bytes(read_u8(addr + i) for i in range(size))
+        return int.from_bytes(data, byteorder="little", signed=signed)
+    raise RuntimeError("No suitable memory read method found")
 
 
 def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: Path | None = None, mem_cfg: dict | None = None) -> dict:
@@ -49,7 +65,7 @@ def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: 
         if mem_cfg:
             try:
                 m = env.emu.memory  # type: ignore[attr-defined]
-                for k in ("progress", "speed", "wrong_way", "lap"):
+                for k in ("progress", "speed", "wrong_way", "lap", "collisions"):
                     entry = mem_cfg.get(k)
                     if not entry:
                         continue
@@ -68,8 +84,10 @@ def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: 
         vis = cv2.resize(frame, (256 * 2, 192 * 2), interpolation=cv2.INTER_NEAREST)
         overlay = (
             f"t={t+1} act={ACTIONS[action_idx]} r={reward:.3f} "
-            f"env[spd={info.get('speed')} prog={info.get('progress_raw')} ww={info.get('wrong_way')}] "
-            f"mem[spd={mem_vals.get('speed')} prog={mem_vals.get('progress')} ww={mem_vals.get('wrong_way')}]"
+            f"env[spd={info.get('speed')} prog={info.get('progress_raw')} "
+            f"ww={info.get('wrong_way')} col={info.get('collisions_episode')}] "
+            f"mem[spd={mem_vals.get('speed')} prog={mem_vals.get('progress')} "
+            f"ww={mem_vals.get('wrong_way')} col={mem_vals.get('collisions')}]"
         )
         cv2.putText(vis, overlay, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 230, 20), 1, cv2.LINE_AA)
         cv2.imshow(win_name, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))

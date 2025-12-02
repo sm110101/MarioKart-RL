@@ -4,21 +4,28 @@
 
 progress:
   # 0x02363BE0 — Lap Progress (user-provided)
-  addr: 0x02363BA0
-  size: 2
+  addr: 0x0234E1A0
+  size: 4
   little_endian: true
   signed: false
-  scale: 0.0001
+  scale: 1.0
 
 
 speed:
   # 0x02367EEA — Likely speed (user-provided)
-  addr: 0x0217AD10
+  addr: 0x023524A2
   size: 2
   little_endian: true
   signed: false
   # Scale 2-byte speed down to keep reward from clipping (tunable)
-  scale: 0.001
+  scale: 0.01
+
+collisions:
+  # 0x02368058 — Wall collisions counter (user-provided)
+  addr: 0x02352610
+  size: 1
+  little_endian: true
+  signed: false
 
 
 wrong_way:
