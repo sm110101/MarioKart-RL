@@ -414,13 +414,15 @@ class MarioKartDSEnv(gym.Env):
 
         # Reward: increase ONLY when forward progress increases; penalize when it decreases.
         # When delta_progress == 0, no positive reward (penalties may still apply).
+        # If wrong-way is active, ignore progress contribution entirely.
         r = 0.0
-        if delta_progress > 0:
+        delta_progress_for_reward = 0 if ww else delta_progress
+        if delta_progress_for_reward > 0:
             r += 0.05 * spd  # speed term (tunable)
-            r += self._progress_reward_coef * float(delta_progress)  # lap-progress term
-        elif delta_progress < 0:
+            r += self._progress_reward_coef * float(delta_progress_for_reward)  # lap-progress term
+        elif delta_progress_for_reward < 0:
             # Penalize proportional to backward progress
-            r -= self._progress_reward_coef * float(abs(delta_progress))
+            r -= self._progress_reward_coef * float(abs(delta_progress_for_reward))
         # Track cumulative forward progress for display
         self._cum_progress += int(delta_progress)
         if ww:
