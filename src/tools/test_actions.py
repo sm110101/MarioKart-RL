@@ -118,7 +118,7 @@ def run_action(env: MarioKartDSEnv, action_idx: int, steps: int = 240, out_dir: 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = str(repo_root / "ROM" / "mariokart.nds")
-    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv")
+    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+480.dsv")
     mem_cfg_path = repo_root / "src" / "configs" / "memory_addresses.yaml"
     mem_cfg = {}
     try:

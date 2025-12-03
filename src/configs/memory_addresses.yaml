@@ -3,17 +3,17 @@
 # size: 1|2|4 bytes. little_endian: true|false. signed: true|false. scale: optional float multiplier.
 
 progress:
-  # 0x02363BE0 — Lap Progress (user-provided)
-  addr: 0x0234E1A0
+  # 0x02363BE0 — Lap Progress (user-provided) f
+  addr: 0x0234E160
   size: 4
   little_endian: true
   signed: false
-  scale: 1.0
+  #scale: 0.1
 
 
 speed:
   # 0x02367EEA — Likely speed (user-provided)
-  addr: 0x023524A2
+  addr: 0x0217AD10
   size: 2
   little_endian: true
   signed: false
@@ -22,7 +22,7 @@ speed:
 
 collisions:
   # 0x02368058 — Wall collisions counter (user-provided)
-  addr: 0x02352610
+  addr: 0x023525D0
   size: 1
   little_endian: true
   signed: false

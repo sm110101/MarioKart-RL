@@ -15,7 +15,7 @@ from src.envs.mario_kart_ds_env import MarioKartDSEnv
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = str(repo_root / "ROM" / "mariokart.nds")
-    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv")
+    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+480.dsv")
 
     env = MarioKartDSEnv(rom_path=rom_path, savestate_path=savestate_path, frame_skip=4)
     obs, info = env.reset()

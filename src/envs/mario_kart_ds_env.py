@@ -118,6 +118,22 @@ class MarioKartDSEnv(gym.Env):
         self._collision_penalty: float = float(0.5)
         self._collision_terminate_threshold: int = int(3)
 
+        # Speed sanitization to prevent reward hacking from spikes
+        self._prev_speed_value: float | None = None
+        self._speed_abs_max: float = 200.0
+        self._speed_spike_factor: float = 3.0
+        self._speed_spike_add: float = 20.0
+
+        # Track last collision delta for termination logic
+        self._last_collision_delta: int = 0
+
+        # Lap-progress reward coefficient (tunable)
+        self._progress_reward_coef: float = 0.001
+
+        # Episode aggregates for viewer and shaping intuition
+        self._episode_return: float = 0.0
+        self._cum_progress: int = 0
+
     def _load_savestate(self) -> None:
         self.emu.savestate.load_file(self.savestate_path)
         self.emu.resume()
@@ -173,6 +189,10 @@ class MarioKartDSEnv(gym.Env):
         self._since_reset_steps = 0
         self._collisions_prev_raw = self._read_entry_raw("collisions")
         self._collisions_count = 0
+        self._prev_speed_value = 0.0
+        self._last_collision_delta = 0
+        self._episode_return = 0.0
+        self._cum_progress = 0
         info: dict[str, Any] = {}
         return obs, info
 
@@ -189,19 +209,29 @@ class MarioKartDSEnv(gym.Env):
         reward = self._compute_reward()
         self._episode_steps += 1
         self._since_reset_steps += 1
+        self._episode_return += float(reward)
         terminated = self._check_terminated()
-        truncated = self._episode_steps >= self._max_steps
+        # No fixed max steps: do not truncate based on time
+        truncated = False
         info: dict[str, Any] = {}
         if self._debug:
             info["progress_raw"] = self._read_entry_raw("progress")
-            info["speed"] = self._read_speed()
+            # expose sanitized speed for viewers
+            info["speed"] = getattr(self, "_last_speed_sanitized", None)
             info["wrong_way"] = self._read_wrong_way()
             info["lap"] = self._read_lap()
             info["collisions_raw"] = self._read_entry_raw("collisions")
             info["collisions_episode"] = self._collisions_count
+            info["return"] = self._episode_return
+            info["cum_progress"] = self._cum_progress
         # make last info available to viewers
         self._last_info = info  # type: ignore[assignment]
         self._last_reward = reward  # type: ignore[assignment]
+        # expose last stacked observation for viewers
+        try:
+            self._last_obs_np = obs  # type: ignore[attr-defined]
+        except Exception:
+            pass
         return obs, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray:
@@ -318,20 +348,60 @@ class MarioKartDSEnv(gym.Env):
         # Speed-based reward with collision penalties.
         speed = self._read_speed()
         wrong_way = self._read_wrong_way()
+        lap = self._read_lap()
+        progress_raw = self._read_entry_raw("progress")
 
         # Collision delta (handle wrap for 1-byte counters)
         coll_raw = self._read_collisions_raw()
+        delta_coll = 0
         if coll_raw is not None:
             if self._collisions_prev_raw is None:
                 self._collisions_prev_raw = coll_raw
-            delta = (int(coll_raw) - int(self._collisions_prev_raw)) % self._collisions_modulus
-            if delta > 0:
-                self._collisions_count += delta
+            # compute delta BEFORE updating prev so we can penalize this step
+            delta_coll = (int(coll_raw) - int(self._collisions_prev_raw)) % self._collisions_modulus
+            if delta_coll > 0:
+                self._collisions_count += delta_coll
             self._collisions_prev_raw = coll_raw
+        # store for termination check
+        self._last_collision_delta = delta_coll
 
         # Handle missing readings gracefully
-        spd = float(speed or 0.0)
+        spd_raw = float(speed or 0.0)
         ww = 1 if (wrong_way is not None and wrong_way != 0) else 0
+
+        # Sanitize speed: if raw value not in [0, 5400], treat as 0
+        if not (0.0 <= spd_raw <= 5400.0):
+            spd = 0.0
+        else:
+            # Additional spike guard to block unrealistic jumps between frames
+            spd = spd_raw
+            if spd > self._speed_abs_max:
+                spd = self._speed_abs_max
+            if self._prev_speed_value is not None:
+                spike_by_factor = spd > (self._prev_speed_value * self._speed_spike_factor)
+                spike_by_add = spd > (self._prev_speed_value + self._speed_spike_add)
+                if (spike_by_factor or spike_by_add) and (delta_coll > 0 or spd_raw > self._speed_abs_max):
+                    # treat as sensor glitch; hold previous speed
+                    spd = self._prev_speed_value
+        self._prev_speed_value = spd
+        # store for overlays
+        self._last_speed_sanitized = spd  # type: ignore[attr-defined]
+
+        # Lap-progress delta: accumulate forward progress across laps
+        delta_progress = 0
+        if progress_raw is not None:
+            prev = int(self._prev_progress_raw or 0)
+            cur = int(progress_raw)
+            modulus = self._progress_modulus
+            if self._last_lap is not None and lap is not None and lap != self._last_lap:
+                # Lap wrap: add remainder of previous lap + current lap progress
+                delta_progress = (modulus - prev) + cur
+            else:
+                # Forward modulo delta (assumes no wrong-way; wrong-way terminates episode)
+                delta_progress = (cur - prev) % modulus
+            self._prev_progress_raw = progress_raw
+            if lap is not None:
+                self._last_lap = lap
 
         # Consider "stuck" if speed stays below a tiny threshold
         if spd <= 1e-3:
@@ -339,38 +409,31 @@ class MarioKartDSEnv(gym.Env):
         else:
             self._no_progress_counter = 0
 
-        # Reward: proportional to speed, penalty for wrong-way and collisions
-        r = 0.05 * spd  # tune coefficient as needed to avoid clipping
+        # Reward: increase ONLY when forward progress increases; penalize when it decreases.
+        # When delta_progress == 0, no positive reward (penalties may still apply).
+        r = 0.0
+        if delta_progress > 0:
+            r += 0.05 * spd  # speed term (tunable)
+            r += self._progress_reward_coef * float(delta_progress)  # lap-progress term
+        elif delta_progress < 0:
+            # Penalize proportional to backward progress
+            r -= self._progress_reward_coef * float(abs(delta_progress))
+        # Track cumulative forward progress for display
+        self._cum_progress += int(delta_progress)
         if ww:
-            r -= 0.1
-        if self._collisions_count > 0 and coll_raw is not None:
-            # Penalize only on delta this step
-            # (recompute delta for reward to avoid double-penalizing)
-            delta = (int(coll_raw) - int(self._collisions_prev_raw or coll_raw)) % self._collisions_modulus
-            if delta > 0:
-                r -= self._collision_penalty * float(delta)
+            # strong penalty for wrong-way
+            r -= 1.0
+        if delta_coll > 0:
+            # strong penalty per collision
+            r -= 1.0 * float(delta_coll)
         return float(np.clip(r, -1.0, 1.0))
 
     def _check_terminated(self) -> bool:
-        # Terminate immediately on wrong-way flag (after grace period)
+        # Terminate immediately on wrong-way flag or any collision
         ww = self._read_wrong_way()
-        if ww is not None and ww != 0 and self._since_reset_steps > self._grace_steps_wrong_way:
+        if ww is not None and ww != 0:
             return True
-
-        lap = self._read_lap()
-        if lap is not None:
-            if self._last_lap is None:
-                self._last_lap = lap
-            elif lap != self._last_lap:
-                # Lap changed -> terminate episode
-                self._last_lap = lap
-                return True
-        # Stuck detection: no progress for ~N seconds
-        if (self._since_reset_steps > self._grace_steps_no_progress and
-                self._no_progress_counter >= self._no_progress_limit_steps):
-            return True
-        # Collision termination
-        if self._collisions_count >= self._collision_terminate_threshold:
+        if self._last_collision_delta > 0:
             return True
         return False
 

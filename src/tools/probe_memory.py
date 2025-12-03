@@ -14,7 +14,7 @@ except Exception as import_error:
 def resolve_paths() -> tuple[Path, Path, Path]:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = repo_root / "ROM" / "mariokart.nds"
-    savestate_path = repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv"
+    savestate_path = repo_root / "ROM" / "yoshi_falls_time_trial_t+480.dsv"
     mem_cfg_path = repo_root / "src" / "configs" / "memory_addresses.yaml"
     return rom_path, savestate_path, mem_cfg_path
 

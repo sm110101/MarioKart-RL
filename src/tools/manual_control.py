@@ -36,7 +36,7 @@ def resolve_paths() -> tuple[Path, Path]:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = repo_root / "ROM" / "mariokart.nds"
     # Use offset savestate so gameplay starts immediately
-    savestate_path = repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv"
+    savestate_path = repo_root / "ROM" / "yoshi_falls_time_trial_t+480.dsv"
     return rom_path, savestate_path
 
 

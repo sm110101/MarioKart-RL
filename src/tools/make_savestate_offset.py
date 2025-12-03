@@ -12,7 +12,7 @@ def resolve_paths() -> tuple[Path, Path, Path]:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = repo_root / "ROM" / "mariokart.nds"
     in_state = repo_root / "ROM" / "yoshi_falls_time_trial.dsv"
-    out_state = repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv"
+    out_state = repo_root / "ROM" / "yoshi_falls_time_trial_t+480.dsv"
     return rom_path, in_state, out_state
 
 
@@ -26,7 +26,7 @@ def main() -> int:
         print(f"Input savestate not found: {in_state}", file=sys.stderr)
         return 1
 
-    frames = 420  # 7 seconds at 60 fps
+    frames = 480  # 8 seconds at 60 fps
     print(f"[make_savestate_offset] Loading ROM and savestate, advancing {frames} frames...")
 
     emu = DeSmuME()

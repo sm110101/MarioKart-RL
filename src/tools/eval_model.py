@@ -19,7 +19,7 @@ from src.envs.mario_kart_ds_env import MarioKartDSEnv
 def make_env() -> MarioKartDSEnv:
     repo_root = Path(__file__).resolve().parents[2]
     rom_path = str(repo_root / "ROM" / "mariokart.nds")
-    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t+420.dsv")
+    savestate_path = str(repo_root / "ROM" / "yoshi_falls_time_trial_t.dsv")
     mem_cfg_path = str(repo_root / "src" / "configs" / "memory_addresses.yaml")
 
     return MarioKartDSEnv(
