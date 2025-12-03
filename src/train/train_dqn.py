@@ -195,23 +195,31 @@ def main() -> int:
             self.best_return = -1.0
 
         def _on_step(self) -> bool:
-            # Detect episode boundary via dones and query env attribute for cumulative progress
+            # Detect episode boundary via dones and read episode_return from infos
             dones = self.locals.get("dones", None)
             if dones is None:
                 return True
             try:
-                env0 = self.training_env.envs[0]  # type: ignore[attr-defined-outside-init]
-                ep_ret = getattr(env0, "_episode_return", None)
-                # Guard: some environments may not expose the attribute yet
-                if ep_ret is None:
+                dones_arr = np.array(dones).reshape(-1)
+                infos = self.locals.get("infos", None)
+                if infos is None:
                     return True
-                # When an episode ended in the first (and only) env, evaluate best
-                if bool(np.array(dones).reshape(-1)[0]):
+                # Handle first env only (single-env training)
+                if bool(dones_arr[0]):
+                    info0 = infos[0] if isinstance(infos, (list, tuple)) else infos
+                    ep_ret = info0.get("episode_return", None)
                     if isinstance(ep_ret, (int, float)) and float(ep_ret) > self.best_return:
                         self.best_return = float(ep_ret)
-                        tag = f"{self.best_return:.2f}".replace(".", "_")
-                        save_path = self.save_dir / f"best_return_{tag}_t{self.num_timesteps}.zip"
+                        # Always save to a single, stable path (overwrite previous best)
+                        save_path = self.save_dir / "best_return.zip"
                         self.model.save(str(save_path))
+                        # Optionally write a small metadata file with the score and timestep
+                        try:
+                            with open(self.save_dir / "best_return.txt", "w", encoding="utf-8") as f:
+                                f.write(f"best_return: {self.best_return:.6f}\n")
+                                f.write(f"timesteps: {self.num_timesteps}\n")
+                        except Exception:
+                            pass
                         print(f"[train_dqn] New best return {self.best_return:.2f}; saved {save_path}")
             except Exception:
                 # Never block training if saving fails

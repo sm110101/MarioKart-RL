@@ -224,6 +224,9 @@ class MarioKartDSEnv(gym.Env):
             info["collisions_episode"] = self._collisions_count
             info["return"] = self._episode_return
             info["cum_progress"] = self._cum_progress
+        # Always expose terminal episode return for callbacks that need it
+        if terminated:
+            info["episode_return"] = self._episode_return
         # make last info available to viewers
         self._last_info = info  # type: ignore[assignment]
         self._last_reward = reward  # type: ignore[assignment]
