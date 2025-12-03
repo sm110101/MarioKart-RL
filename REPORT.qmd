@@ -1,0 +1,200 @@
+---
+title: "Learning to Drive (Again) - Mario Kart DS with Image-Based RL"
+encoding: "UTF-8"
+format:
+    html:
+        embed-resources: true
+author: "Sean Morris"
+date: "2025-12-02"
+keywords: ["reinforcement learning", "Mario Kart DS (MKDS)", "emulation", "computer vision"]
+abstract: |
+  In this work, I use recently made progress in deep reinforcement learning to train an end-to-end controller capable of running Mario Kart DS based purely on pixel observation. My code adopts the py-desmume emulator that creates a controlled and reproducible environment, where the top screen feeds the agent with a number of preprocessed grayscale frames. Actions correspond to discrete button presses, which resemble those of a human—e.g., accelerating, turning, and braking. To enable stable learning and strong performances, I use a shaped reward system with lap progress, sanitized speed, and a penalty for collisions or going the wrong way.Episodes get initialized from savestates, skip menus, and start straight away at the race. Through the DQN algorithm adopted in Stable Baselines3, I demonstrate that the agent can learn to complete laps on the 'Yoshi Falls' circuit. This work demonstrates that RL frameworks and emulator tools used in modern times can be used effectively to tackle classic games in s reproducible manner.
+---
+
+# 1. Introduction
+
+In this paper, I set out to explore whether deep reinforcement learning—specifically DQN with convolutional neural networks—can achieve faster lap times in Mario Kart DS than a veteran human player. Mario Kart DS serves as an ideal benchmark due to its blend of nostalgic value, approachable complexity, and the ease with which it can be interfaced programmatically via modern open-source emulators such as `py-desmume`. The game's relatively low computational demands further allow for extensive experimentation and rapid iteration of model configurations.
+
+By tackling this challenge, I hope to shed light on the capabilities and limitations of pixel-based RL methods in realistic, visually rich control settings. This work aims not only to advance our understanding of reinforcement learning in emulator-driven game environments, but also to encourage reproducible research on widely accessible, classic games.
+
+# 2. Related Work
+
+In this project, I construct an end-to-end control model using pixel inputs pulled from the emulator's frames. While a generally well-known idea, [Mnih et al. (2015)](https://www.nature.com/articles/nature14236) provide a well-formulated approach for tying together vision-based encodings with Q-learning in their pursuit of engineering an agent capable of excelling in over 40 different Atari games. In this paper, I borrow from the study above to aid in selecting initial parameter values for the model's replay buffer size and training frequency. Frame skipping for efficiency is also adopted: the environment is created with frame_skip=4, directly paralleling the Atari agent's strategy of selecting an action every \(k=4\) frames and repeating it in between, which both speeds up training and smooths the dynamics perceived by the agent. 
+
+Although this project uses DQN not simply as a replacement for PPO, many essential design decisions involve modeling the stability-centric approaches proposed in [Schulman et al (2017)](https://arxiv.org/abs/1707.06347), infrequent target network updates (`target_update_interval=10,000`), and large buffer for replay runs. These parameters together help suppress abrupt changes in the value function such that there is a focus on stable and incremental progress over millions of steps. Also the feeling of batch-style training of PPO, running multiple times over trajectory data again in SGD is rekindled by the use of off-policy replay: transitions are saved in an extensive buffer and sampled over and over again (`batch_size=32`, `train_freq=(4, "step")`), which increases sample efficiency considerably, in particular for the emulation steps as the emulation is quite slow. Finally, since we have a high discount factor (`gamma=0.99`) and long episode horizons (`max_steps=8000`), we follow PPO's best practice for complex control by ensuring the agent learns more sophisticated behaviours at large time horizons (more than simply the period of decision). It would appear from this that the basic principles of PPO directly motivated practical decisions on our DQN system for Mario Kart DS, which adopted their generalities and applied them to the context of value-based RL on classic games.
+
+
+# 3. Methods
+
+## 3.1 Environment and Observations
+
+The most important part of setting up the environment for this study was finding a reliable open-source Nintendo DS emulator that offers programmatic access. After a brief search, I elected to use [`py-desmume`](https://pypi.org/project/py-desmume/). From there, I downloaded a mario cart ROM file which gets fed into the emulator, producing a perfect recreation of the game with robust configurations. Once loaded in, I created a savestate that bypasses the main menu and starts the gamestate right at the beginnig of the time trial. Taking this simple preliminary step allows us to not worry about mapping input sequences to instantiate the environment. For the actual state observations, I read the emulator's 384x256 RGB buffer, crop the 256x192 top screen, convert it to greyscale, and resize it to 84x84 using area interpolation. Finally, I stack the latest four frames to form a 4x84x84 tenser. 
+
+The action space is kept simple - consisting of a set of six discrete actions: Coast ([]), A (["z"-->A]), L (["left"]), R (["right"]), L+A (["z", "left"]), and R+A (["z", "right"]). These PC-labels mirror the actual controler used in `manual_control.py`, and are translated internally to Nintendo DS keypad masks by the environment. 
+
+| Component | Details |
+|---|---|
+| Emulator | py-desmume (DeSmuME 0.9.12 x64-JIT); headless stepping via `cycle(with_joystick=False)` to avoid joystick state overwriting keypad holds across `frame_skip`. |
+| ROM / Savestate | `ROM/mariokart.nds` with offset savestate `yoshi_falls_time_trial_t+480.dsv`; `reset()` loads the savestate and skips menus (we use `settle_frames=0` in training). |
+| Observation preprocessing | Capture 384x256 RGB buffer; crop top screen 256x192; grayscale; resize to 84x84 (INTER_AREA); stack last 4 frames --> (4x84x84, uint8). Control uses `frame_skip=4`. |
+| Action space (6) | Coast ([]), A (["z"-->A]), L (["left"]), R (["right"]), L+A (["z","left"]), R+A (["z","right"]); PC-key labels mirror `manual_control.py`, translated to DS keypad masks in the env. |
+
+## 3.2 Reward Shaping, RAM Mapping, and Termination
+
+When considering how to most effectively design reliable reward mechanics in this project, I new that exposing the agent to actual run-time variables would be incredibly helpful. In practice, this was the hardest engineering step: addresses that looked obviously correct in DeSmuME's RAM Search sometimes returned zeros in Python unless we used the exact absolute ARM9 bus mapping and the documented `emu.memory.read(start, end, size, signed)` interface (falling back to the unsigned accessor or byte-wise reads when needed). Getting the mapping right was key because every downstream choice—sanitizing speed, accumulating lap progress across wrap events, and triggering penalties/termination—depends on stable, low-latency reads on every frame. In the end, I was able to successfully map and pull four key in-game signals: `[speed, lap_num, wrongway_flag, collision_ct]`. Upon testing to ensure that these reads were indeed accurate, I was able to apply further sanitation to get the following reward structure:  
+
+| Component | Condition | Reward update | Coefficients / Bounds | Terminates episode? |
+|---|---|---|---|---|
+| Forward progress | `delta_progress > 0` (wrap-aware across lap resets) | `r += 0.05 * speed_sanitized + progress_coef * delta_progress` | `speed_coef = 0.05`, `progress_coef = 0.001` | No |
+| No progress | `delta_progress == 0` | No positive reward added (penalties may still apply) | – | No |
+| Backward progress | `delta_progress < 0` | `r -= progress_coef * abs(delta_progress)` | `progress_coef = 0.001` | No |
+| Speed sanitization | Raw speed not in `[0, 5400]` --> set to `0`; spike guard limits frame-to-frame jumps | Reward uses sanitized speed only | Abs max clamp `200.0`; spike checks (factor 3.0, +20.0) | No |
+| Wrong-way flag | `wrong_way != 0` | `r -= 1.0` | Strong penalty | Yes (immediate) |
+| Collision | `delta_collision > 0` (any increment) | `r -= 1.0 * delta_collision` | Strong penalty per event | Yes (immediate) |
+
+## 3.3 Agent and Training
+
+For the learning process, I elected to use [Stable-Baselines3's](https://stable-baselines3.readthedocs.io/en/master/modules/dqn.html) DQN with the default `CnnPolicy`. As stated above, I continuously relied on the hyperparameters used in [Mnih et al. (2015)](https://www.nature.com/articles/nature14236) as a baseline, opting instead to mainly alter the reward structure. The final agent's hyperparameters take the following form: learning rate \(1\times10^{-4}\), replay buffer \(100{,}000\) transitions, batch size 32, discount \(\gamma=0.99\), target network update every 10,000 steps, and training every 4 env steps (i.e., `train_freq=(4,"step")`). The training environment gets instantiated using a single `DummyVecEnv` instance with `frame_skip=4`. The environment resets from a custom offset of the original savestate. After some tweaks, I chose for the offset to last 480 frames to account for both the race countdown, and time needed for all run-time variables to settle into the needed "race" game state in the emulator. 
+
+The training process runs on CUDA using an Nvidia RTX 4070 Super 12GB GPU, with CPU as a fallback. In the final configuration, I set episodes to terminate immediately when the agent either collides with any obstacles or triggers the `wrongway_flag`. The rewards are structured such that returns accrue only when wrap-aware forward lap progress increases, and are further scaled by a sanitized speed signal. Any speed values read outside the range [0, 5400] are set to zero (this is done to remedy issues caused by run-time signal glitches). This was an especially important step, as in early trials, the agent actually learned to recreate this glitch and collect abnormally large returns.
+
+Finally, the training script exposes a `--watch` flag that enables a live viewer, where the right-hand panel renders step metrics (step reward, sanitized speed, raw progress, lap, wrong-way, collisions, cumulative return) and an action-probability bar chart updated online. Checkpoints are saved every `--ckpt-freq` steps, and interruptions are handled by saving a snapshot (`last_model_interrupt.zip`) so runs can be resumed later.
+
+**Fig 1:Training Viewer**
+
+![](./img/Screenshot%202025-12-03%20124447.png)
+
+
+# 5. Results
+
+The learning dynamics are consistent with a stable DQN run and the final policy achieves the target behavior: completing a full lap around Yoshi Falls.
+
+**Fig 2: Train/Loss**
+
+![](./img/Screenshot%202025-12-03%20123250.png)
+
+The loss starts near zero and steadily rises in both mean and variance as the replay buffer populates and the agent encounters more diverse states. Periodic spikes appear throughout training—typical for value-based methods as the target network lags the online network and as rare transitions (e.g., collisions or lap-wraps) are replayed. Despite this volatility, the curve exhibits an upward drift with no runaway divergence, indicating healthy TD learning rather than instability.
+
+**Fig 3: Rollout/Exploration**
+
+![](./img/Screenshot%202025-12-03%20123303.png)
+
+Epsilon decays from its initial value (~0.65) to the minimum (0.05) within the first ~100k–150k steps and remains there for the rest of training. After this point the agent largely exploits its learned Q-values while still injecting a small amount of randomness. This schedule proved important for quickly discovering forward-driving behaviors and then consolidating them.
+
+Qualitatively, the agent learns to accelerate, hold lines, and correct steering sufficiently to maintain forward lap progress with minimal wrong-way flags. With the final configuration of rewards, memory reads, and termination logic, the trained policy successfully completes a full lap around the track without manual intervention. This validates the environment integration, observation pipeline, and reward shaping choices used in this project.
+
+# 6. Discussion
+
+
+The final results demonstrate that the DQN agent, provided with clean RAM-mapped state signals and shaped rewards, learns an effective driving policy for Yoshi Falls time trial. The most successful runs show reliable forward progress, few to no collisions, and correct lap completion—while the action usage and policy outputs resemble plausible human driving patterns (coasting less, accelerating and steering consistently through corners).
+
+Some important discussion points and limitations:
+
+- **Reward Signal Engineering**: The combination of speed and delta-progress in the reward, with strong penalties for collisions and wrong-way flags, proved essential. Pure speed rewards without progress signals led to orbiting or “hacking” behaviors; only progress signals made the policy overly cautious and likely to get stuck.
+
+- **Memory Mapping and Signal Trust**: Correct mapping of in-game variables was a major engineering effort. Early misreads by even a few address bytes led to unstable or nonsensical agent behaviors (e.g., interpreting spurious memory as speed, causing the agent to “cheat” rewards).
+
+- **Termination Tuning**: Strict episode-ending on single collisions/wrong-way reduced variance and forced the agent to be robust. However, it trades off learning from recovery strategies—potentially recoverable errors are not explored. This is acceptable for the time-trial context, but would require softening for longer or more open-ended tasks.
+
+- **Stable-Baselines3 DQN Performance**: The default CnnPolicy and hyperparameters (near Mnih et al. 2015) sufficed for this domain, likely because the state/observation preprocessing pipeline provides clear, low-dimensional features and the action space is small.
+
+- **Sample Efficiency and Exploration**: Epsilon decay schedules required tuning to encourage initial exploration. Too-quick decay sometimes resulted in local optima (stuck in minimal-movement patterns early on).
+
+- **Transferability**: The approach here could work for other tracks or savestates, but only if memory-mapped variables are similarly accessible and stable. Tracks with more complex layouts or distracted reward shaping (e.g., with jumps, drift, or AI racers) would likely need retraining and additional signal engineering.
+
+- **Limitations**: The agent doesn't generalize beyond the time trial state/startline, and only sees specific RAM signals. The learned policy is brittle to timing/collision signal noise. Human-level performance is still out of reach—expert drivers complete laps much faster and with greater adaptability.
+
+Despite these, the project validates the feasibility of direct RAM-mapped reinforcement learning from a handheld console emulator, and lays groundwork for richer integrations (future work: multi-track, opponent agents, trainable vision pipelines, more robust Gym APIs). The clean separation between environment mechanics, memory interfaces, and agent policy proved crucial for debugging and extending the stack.
+
+**Best Evaluation Run:**
+
+- Return: **598.517000**
+- Timesteps: **1,507,337**  
+(See `runs/dqn_mkds/best/best_return.txt`)
+
+
+**GIF: Early Run Example**
+
+![Early Run](./img/Early_run.gif)
+
+**GIF: Best Lap Output**  
+![Best Lap](./img/Full_lap.gif)
+
+
+
+
+## Engineering Log: Iterations and Decisions
+
+- Emulator bring-up and savestate control
+  - Verified ROM boot and py-desmume import on Windows; locked DeSmuME 0.9.12 x64-JIT.
+  - Created `src/tools/verify_savestate.py` to load `ROM/mariokart.nds`, apply `yoshi_falls_time_trial.dsv`, advance frames, and save a screenshot.
+  - Added `src/tools/make_savestate_offset.py` to generate offset savestates (t+240 --> t+420 frames) to start measurement immediately after countdown.
+  - Ensured headless stepping with `cycle(with_joystick=False)` to avoid joystick state overwriting keypad state.
+
+- Observation pipeline
+  - Built `src/vision/preprocess.py`: crop top screen (192x256), grayscale, resize (84x84), `FrameStacker` (4x84x84).
+  - Added `src/tools/verify_preproc.py` to capture raw and preprocessed frames for quick inspection.
+
+- Environment (`MarioKartDSEnv`) skeleton
+  - Implemented Gymnasium env with frame skipping, stacked observations, minimal action set.
+  - First mapping used DS button abstractions; later switched the action API to PC key names mapped via `PC_TO_DS` (for parity with manual control).
+  - Added `render()` returning the RGB top-screen for viewers.
+
+- Input semantics and action mapping (multiple revisions)
+  - Initial attempt: per-frame press/clear; later switched to “press once, hold across frame_skip, then release” for stability.
+  - Tried accelerate as `A`, `Up`, and redundantly `A+Up`; settled on PC-key-based actions mirroring manual control:
+    - Coast, A, Left, Right, Left+A, Right+A (no jump/drift).
+  - Built `src/tools/test_actions.py` to run each action for 240 steps with live overlay and saved start/end frames.
+  - Created `src/tools/manual_control.py` (pynput) to verify that “Z(A), arrows, W(R)” control works live.
+
+- Memory access and address validation
+  - Implemented robust reads in env and tools:
+    - Preferred `emu.memory.read(start, end, size, signed)` (docs).
+    - Fallback to `emu.memory.unsigned.read(...)` (if present).
+    - Fallback to `read_u8` composition (LE).
+  - Confirmed DeSmuME RAM Search GUI candidates; iterated on addresses until speed/progress/collisions were observed.
+  - Added typed overlays in `test_actions.py` showing env[…] and direct mem[…] simultaneously for on-screen validation.
+  - Wrote a temporary scanning tool to diff a small memory window while accelerating; used results to refine speed address (later removed per request).
+
+- Address set and scaling (examples used during development)
+  - Lap progress (absolute DS address; 4 bytes, LE). Recognized reset at new lap; designed wrap-aware delta.
+  - Speed (2 bytes, LE). Added scale factor to keep reward within a numerically stable range.
+  - Wrong-way flag (1 byte) and Lap (1 byte).
+  - Collisions (1 byte). Differential count for penalties/termination.
+
+- Reward shaping and termination (several iterations)
+  - v1: speed-only reward; later added lap progress term.
+  - Sanitized speed: raw outside [0, 5400] --> zero; additional spike guard to prevent reward hacks on impact.
+  - Progress accumulation across laps: wrap-aware delta; added coefficient `progress_reward_coef`.
+  - Explicit rule: reward only increases when forward progress increases; no positive reward at zero-progress; negative reward if progress decreases.
+  - Termination policies tried:
+    - Pre-race: grace windows and max_steps.
+    - Strict final policy: immediate termination on wrong-way or any collision (single event).
+    - Collision penalty strengthened (−1 per delta); wrong-way penalty strengthened (−1); removed time-based truncation.
+
+- Training stack (SB3)
+  - Baseline: DQN with CnnPolicy; lr=1e−4, buffer=100k, batch=32, gamma=0.99, target_update=10k, train_freq=(4,"step").
+  - Attempted Rainbow components (dueling + prioritized replay via `sb3-contrib`); rolled back to plain SB3 for compatibility.
+  - Added `--watch` viewer: displays live metrics (r, spd, prog, lap, ww, col, Rsum) and action probability bars; shifted layout for better label visibility.
+
+- Evaluation
+  - `src/tools/eval_model.py` records an MP4 with on-frame overlay of r, spd, ww, lap, collisions.
+
+- Viewer/overlay refinements
+  - Added right-side panel with vertically stacked environment variables.
+  - Rounded Rsum to 2 decimals; removed ProgSum per request.
+  - Relabeled actions to human-readable: Coast, A, L, R, L+A, R+A; shifted bars to expose labels.
+
+- GPU setup
+  - Guided installation of CUDA-enabled PyTorch for RTX 4070 Super; documented version-specific index URLs for Python 3.13 (cu118) and 3.11 (cu118/cu121). Verified device selection logs.
+
+- Report scaffolding
+  - Wrote `REPORT.md` skeleton with abstract --> conclusion, references, and appendices; included reproducibility checklist and Quarto/BibTeX notes.
+
+
+
+
+
+
+
+
